@@ -1,4 +1,3 @@
-setwd('C:\\Users\\leoka\\Documents\\DataScienceAcademy\\BigDataRAzure\\Projetos')
 
 library(readxl)
 library(dplyr)
@@ -6,9 +5,12 @@ library(ggplot2)
 library(tidyr)
 library(corrplot)
 library(stringr)
+library(randomForest)
 library(caret)
 
-df <- read_excel('FEV-data-Excel.xlsx')
+df <- read.table('https://raw.githubusercontent.com/rosakavalco/Machine-Learning---Consumo-de-Carros-Eletricos/main/FEV-data-Excel.csv',
+              header=TRUE, sep=";", na.strings = NA, encoding = "UTF-8", dec=",")
+
 names(df) <- make.names(names(df), unique=TRUE)
 View(df)
 str(df)
@@ -64,11 +66,12 @@ df = df %>%
   mutate(Drive.type = ifelse(Drive.type == "2WD (front)", "2WD", Drive.type)) %>%
   mutate(Drive.type = ifelse(Drive.type == "2WD (rear)", "2WD", Drive.type)) %>%
   mutate(Type.of.brakes = ifelse(is.na(Type.of.brakes), "disc (front + rear)", Type.of.brakes)) %>%
-  select(-names(which(colSums(is.na(df))>0)), -Car.full.name, -Make, -Model)
+  select(-names(which(colSums(is.na(df))>0)), -X.U.FEFF.Car.full.name, -Make, -Model)
 
 # Vamos dividir o dataset em treino e teste (80/20)
 
 tamanho_treino = floor(0.8 * nrow(df))
+set.seed(124)
 train_ind = sample(seq_len(nrow(df)), size = tamanho_treino)
 
 df_treino = df[train_ind,]
@@ -87,10 +90,6 @@ df_teste = cbind(predict(dummy,df_teste), df_teste)
 df_teste = subset(df_teste, select=-Drive.type)
 df_teste = predict(Normalizer, df_teste)
 
-
-str(df_treino)
-View(df_treino)
-
 x_treino = df_treino %>%
   select(-mean...Energy.consumption..kWh.100.km.)
 y_treino = df_treino$mean...Energy.consumption..kWh.100.km.
@@ -99,45 +98,65 @@ x_teste = df_teste %>%
   select(-mean...Energy.consumption..kWh.100.km.)
 y_teste = df_teste$mean...Energy.consumption..kWh.100.km.
 
+norm_df = rbind(df_teste,df_treino)
+train_control <- trainControl(method="repeatedcv",
+                              number=10, repeats = 3)
 
 ### Treinamento dos modelos ###
-
-# Primeiro modelo - regressão linear utilizando o `Drive type` e o `Minimal empty weight`
-
-model1 = lm("mean...Energy.consumption..kWh.100.km. ~ Drive.type2WD + Minimal.empty.weight..kg.", data = df_treino)
-summary(model1)
-postResample(pred=predict(model1, x_teste), y_teste)
-
-# Segundo modelo - Vamos utilizar RFE para selecionar as variáveis explicativas da regressão linear
-
-control <- rfeControl(functions = rfFuncs, # random forest
-                      method = "repeatedcv", # repeated cv
-                      repeats = 5, # number of repeats
-                      number = 10) # number of folds
-
-result_rfe <- rfe(x=x_treino,
-                  y=y_treino,
-                  sizes=c(1:ncol(x_treino)),
-                  rfeControl = control)
-
-?rfeControl
-
-selected_cols = predictors(result_rfe)
-selected_cols
-
-# Vamos testar essa seleção com regressão linear e comparar o desempenho com o Benchmark
-
-string_lm = paste(selected_cols, collapse = " + ")
-string_lm = paste("mean...Energy.consumption..kWh.100.km. ~ ", string_lm)
-
-model2 = lm(string_lm, data = df_treino)
-summary(model2)
-postResample(pred=predict(model2, x_teste), y_teste)
-
-##### Conclusões #####
-# É possível observar que o benchmark tem indicadores piores no summary, porém quando utilizamos os
-# dados de teste o desempenho tende a ser melhor.
-# O segundo modelo, por outro lado, apresenta bons indicadores no summary, mas seu poder de generalização
-# é menor. Como consequência, o desempenho com os dados de teste não superam o benchmark.
 #
-# O melhor modelo a ser utilizado é o 1.
+# Como forma de contornar o tamanho limitado de nosso dataset, vamos utilizar o
+# Repeated K-fold cross-validation.
+#
+# Primeiro modelo --- Regressão linear utilizando o `Minimal empty weight`
+
+set.seed(124)
+model1 = train(mean...Energy.consumption..kWh.100.km. ~ Minimal.empty.weight..kg., 
+               method="lm",
+               data = norm_df,
+               trControl=train_control)
+print(model1)
+
+# Segundo e terceiro modelos - Vamos utilizar Random Forest para selecionar as 4 principais variáveis explicativas.
+# Com essas variáveis vamos fazer um modelo com Regressão Linear, e um com Random Forest. 
+
+set.seed(124)
+rf <- randomForest(as.formula("mean...Energy.consumption..kWh.100.km. ~ ."), data = norm_df)
+rf_importance <- data.frame(importance(rf))
+rf_importance$feature = unlist(row.names(rf_importance))
+rf_importance <- rf_importance[order(rf_importance$IncNodePurity),]
+
+top4features = select(tail(rf_importance, 4), feature)
+
+string_model_2_3 = paste(unlist(top4features), collapse = " + ")
+string_model_2_3 = paste("mean...Energy.consumption..kWh.100.km. ~ ", string_model_2_3)
+
+# Segundo Modelo --- Vamos testar essa seleção de variáveis com regressão linear e comparar o desempenho com o Benchmark
+
+set.seed(124)
+model2 = train(as.formula(string_model_2_3), data = norm_df,
+               method="lm",
+               trControl=train_control)
+print(model2)
+
+# Terceiro Modelo --- Vamos testar a mesma seleção de variáveis com Random Forest
+
+set.seed(124)
+model3 = train(as.formula(string_model_2_3), data = norm_df,
+               method="rf",
+               trControl=train_control)
+print(model3)
+
+##### Conclusões #####################
+#
+# Apesar do conjunto de dados ser muito rico em variáveis, temos muitas variáveis correlacionadas 
+# entre si. Além disso, temos poucos itens no dataset, o que resulta em uma grande variação
+# no desempenho do modelo conforme se cria os conjuntos de treino e teste. 
+#
+# Como forma de contornar esses problemas, opta-se por utilizar Cross Validation e Feature Selection.
+# 
+# É possível observar que o benchmark já possui um desempenho razoável, com Rsquared = 0,77. Entretanto,
+# utilizando mais variáveis explicativas, nosso indicador aumenta.
+#
+# O segundo modelo apresenta Rsquared = 0,81 e o terceiro 0,86.
+# 
+# Com base nas informações acima, o melhor modelo a ser utilizado é o 3.
